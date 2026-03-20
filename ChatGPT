@@ -1,0 +1,239 @@
+import React, { useState, useEffect } from "react";
+
+/* =========================
+   UTILS
+========================= */
+
+function uid() {
+  return Math.random().toString(36).slice(2, 9);
+}
+
+function load(key, fallback) {
+  try {
+    return JSON.parse(localStorage.getItem(key)) || fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function save(key, value) {
+  localStorage.setItem(key, JSON.stringify(value));
+}
+
+function calcRR(entry, sl, tp) {
+  const risk = Math.abs(entry - sl);
+  const reward = Math.abs(tp - entry);
+  return risk ? (reward / risk).toFixed(2) : "";
+}
+
+/* =========================
+   AI ENGINE
+========================= */
+
+function analyzeTrader(trades) {
+  const closed = trades.filter(t => t.result !== "");
+
+  if (closed.length < 5) {
+    return { score: 50, insights: ["Pas assez de données"] };
+  }
+
+  const wins = closed.filter(t => t.result > 0);
+  const losses = closed.filter(t => t.result < 0);
+
+  const winRate = wins.length / closed.length;
+
+  const avgRR =
+    closed.reduce((s, t) => s + (parseFloat(t.rr) || 0), 0) /
+    closed.length;
+
+  const riskAvg =
+    closed.reduce((s, t) => s + (t.risk || 0), 0) /
+    closed.length;
+
+  const pnl = closed.reduce((s, t) => s + (t.result || 0), 0);
+
+  const score = Math.round(
+    winRate * 40 +
+    Math.min(avgRR / 3, 1) * 30 +
+    Math.min(pnl / 1000, 1) * 20 +
+    (riskAvg <= 1 ? 10 : 5)
+  );
+
+  const insights = [];
+
+  if (winRate < 0.45) insights.push("Winrate trop faible");
+  if (avgRR < 1.5) insights.push("R/R trop bas");
+  if (riskAvg > 2) insights.push("Tu risques trop");
+  if (pnl > 0) insights.push("Tu es rentable");
+
+  return { score, insights };
+}
+
+function detectMistakes(trades) {
+  const insights = [];
+
+  const last = trades.slice(0, 5);
+  if (last.length === 5 && last.every(t => t.result < 0)) {
+    insights.push("Revenge trading détecté");
+  }
+
+  const overRisk = trades.filter(t => t.risk > 2).length;
+  if (overRisk > trades.length * 0.3) {
+    insights.push("Risque trop élevé fréquent");
+  }
+
+  return insights;
+}
+
+function analyzeStrategies(trades) {
+  const map = {};
+
+  trades.forEach(t => {
+    (t.strategies || []).forEach(s => {
+      if (!map[s]) map[s] = { trades: 0, wins: 0, pnl: 0 };
+
+      if (t.result !== "") {
+        map[s].trades++;
+        map[s].pnl += t.result;
+        if (t.result > 0) map[s].wins++;
+      }
+    });
+  });
+
+  return Object.entries(map).map(([name, d]) => ({
+    name,
+    trades: d.trades,
+    winRate: d.trades ? Math.round((d.wins / d.trades) * 100) : 0,
+    pnl: d.pnl
+  }));
+}
+
+function findEdge(trades) {
+  const map = {};
+
+  trades.forEach(t => {
+    const key = t.pair + "-" + t.session;
+
+    if (!map[key]) map[key] = { trades: 0, pnl: 0 };
+
+    map[key].trades++;
+    map[key].pnl += t.result || 0;
+  });
+
+  return Object.entries(map)
+    .filter(([_, v]) => v.trades > 3)
+    .sort((a, b) => b[1].pnl - a[1].pnl)[0];
+}
+
+/* =========================
+   MAIN APP
+========================= */
+
+export default function App() {
+  const [trades, setTrades] = useState(() =>
+    load("trades", [])
+  );
+
+  const [form, setForm] = useState({
+    pair: "BTC/USD",
+    session: "London",
+    entry: "",
+    sl: "",
+    tp: "",
+    rr: "",
+    result: "",
+    risk: 1,
+    strategies: ""
+  });
+
+  useEffect(() => {
+    if (form.entry && form.sl && form.tp) {
+      const rr = calcRR(+form.entry, +form.sl, +form.tp);
+      setForm(f => ({ ...f, rr }));
+    }
+  }, [form.entry, form.sl, form.tp]);
+
+  function addTrade() {
+    const t = {
+      ...form,
+      id: uid(),
+      result: form.result ? +form.result : "",
+      strategies: form.strategies.split(",").map(s => s.trim())
+    };
+
+    const next = [t, ...trades];
+    setTrades(next);
+    save("trades", next);
+  }
+
+  function deleteTrade(id) {
+    const next = trades.filter(t => t.id !== id);
+    setTrades(next);
+    save("trades", next);
+  }
+
+  const ai = analyzeTrader(trades);
+  const mistakes = detectMistakes(trades);
+  const stratStats = analyzeStrategies(trades);
+  const edge = findEdge(trades);
+
+  return (
+    <div style={{ maxWidth: 600, margin: "0 auto", padding: 20, color: "#fff", background:"#0d0f14", minHeight:"100vh" }}>
+
+      <h1>Trading AI Dashboard</h1>
+
+      {/* AI SCORE */}
+      <div style={{ background:"#141720", padding:16, borderRadius:10 }}>
+        <h3>AI Score</h3>
+        <div style={{ fontSize:28, color:"#00d4aa" }}>{ai.score}/100</div>
+        {ai.insights.map((i, idx) => <div key={idx}>{i}</div>)}
+        {mistakes.map((m, idx) => <div key={idx} style={{ color:"#ff6b6b" }}>{m}</div>)}
+      </div>
+
+      {/* EDGE */}
+      {edge && (
+        <div style={{ marginTop:20 }}>
+          <h3>Ton Edge</h3>
+          <div>{edge[0]} → {edge[1].pnl}$</div>
+        </div>
+      )}
+
+      {/* STRATEGIES */}
+      <div style={{ marginTop:20 }}>
+        <h3>Strategies</h3>
+        {stratStats.map(s => (
+          <div key={s.name} style={{ background:"#141720", padding:10, marginBottom:6 }}>
+            {s.name} | {s.trades} trades | {s.winRate}% | {s.pnl}$
+          </div>
+        ))}
+      </div>
+
+      {/* FORM */}
+      <div style={{ marginTop:20 }}>
+        <input placeholder="Pair" onChange={e=>setForm({...form,pair:e.target.value})}/>
+        <input placeholder="Session" onChange={e=>setForm({...form,session:e.target.value})}/>
+        <input placeholder="Entry" onChange={e=>setForm({...form,entry:e.target.value})}/>
+        <input placeholder="SL" onChange={e=>setForm({...form,sl:e.target.value})}/>
+        <input placeholder="TP" onChange={e=>setForm({...form,tp:e.target.value})}/>
+        <input placeholder="Result $" onChange={e=>setForm({...form,result:e.target.value})}/>
+        <input placeholder="Risk %" onChange={e=>setForm({...form,risk:+e.target.value})}/>
+        <input placeholder="Strategies (comma)" onChange={e=>setForm({...form,strategies:e.target.value})}/>
+
+        <div>RR: {form.rr}</div>
+
+        <button onClick={addTrade}>Add Trade</button>
+      </div>
+
+      {/* LIST */}
+      <div style={{ marginTop:20 }}>
+        {trades.map(t => (
+          <div key={t.id} style={{ background:"#141720", padding:10, marginBottom:6 }}>
+            {t.pair} | {t.result}$ | RR {t.rr}
+            <button onClick={()=>deleteTrade(t.id)}>X</button>
+          </div>
+        ))}
+      </div>
+
+    </div>
+  );
+}
